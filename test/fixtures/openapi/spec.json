@@ -1,0 +1,19 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Fixture Billing API", "version": "2.4.0" },
+  "servers": [{ "url": "https://api.example.internal/v2" }],
+  "paths": {
+    "/invoices": {
+      "get": { "operationId": "listInvoices", "responses": { "200": { "description": "ok" } } },
+      "post": { "operationId": "createInvoice", "responses": { "201": { "description": "created" } } }
+    },
+    "/invoices/{invoiceId}": {
+      "get": { "operationId": "getInvoice", "responses": { "200": { "description": "ok" } } },
+      "delete": { "operationId": "voidInvoice", "responses": { "204": { "description": "gone" } } }
+    },
+    "/internal/ledger/reconcile": {
+      "post": { "operationId": "reconcileLedger", "responses": { "202": { "description": "queued" } } }
+    }
+  },
+  "components": { "schemas": {} }
+}
