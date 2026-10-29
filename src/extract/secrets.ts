@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { Asset, SecretFinding, Severity } from '../types.js';
 import type { LineIndex } from '../util/text.js';
 import { oneLine, redact } from '../util/text.js';
@@ -17,7 +19,25 @@ export interface SecretContext {
   showSecrets: boolean;
   /** Extra rules, for callers embedding the library. */
   rules?: readonly SecretRule[];
+  /** Called when one of the extraction caps is reached, so it can be reported. */
+  onCap?: (note: string) => void;
 }
+
+/**
+ * How many matches one rule may produce in one asset before it stops.
+ *
+ * A minified bundle with a pathological pattern can otherwise spend the whole
+ * run in one regex. When it fires, say so: silently stopping at 5,000 looks
+ * identical to having found everything.
+ */
+export const MAX_MATCHES_PER_RULE = 5000;
+
+/**
+ * Longest matched value kept. Above this it is almost always a concatenated
+ * blob rather than one credential -- but it does discard the claim-heavy JWTs
+ * the `jwt` rule exists to decode, so it is reported too.
+ */
+export const MAX_VALUE_LENGTH = 600;
 
 interface Range {
   start: number;
@@ -129,6 +149,19 @@ export interface FirebaseConfig {
   /** Bounds of the window the fields were read from. */
   start: number;
   end: number;
+  /**
+   * Tightest span that covers the matched fields themselves.
+   *
+   * The reclassification has to test against this and not against the window.
+   * The window is `anchor - 700` to `anchor + 900`, so a server-side `AIza`
+   * key 400 characters of unrelated code away from a real Firebase config was
+   * relabelled "Firebase web config", exposure public, severity info, next
+   * step "Do not report as a leak" -- turning the tool's most important
+   * false-positive control into a false-negative control over the most
+   * valuable member of the class.
+   */
+  fieldStart: number;
+  fieldEnd: number;
   fields: Record<string, string>;
 }
 
@@ -162,19 +195,24 @@ export function findFirebaseConfigs(text: string): FirebaseConfig[] {
       'databaseURL',
       'measurementId',
     ];
+    let fieldStart = Number.POSITIVE_INFINITY;
+    let fieldEnd = Number.NEGATIVE_INFINITY;
     for (const key of keys) {
       const field = new RegExp(`["']?${key}["']?\\s*:\\s*["']([^"']{1,200})["']`).exec(window);
-      if (field?.[1]) fields[key] = field[1];
+      if (field?.[1] === undefined) continue;
+      fields[key] = field[1];
+      fieldStart = Math.min(fieldStart, start + field.index);
+      fieldEnd = Math.max(fieldEnd, start + field.index + field[0].length);
     }
     if (Object.keys(fields).length < 3) continue;
-    out.push({ anchor: match.index, start, end, fields });
+    out.push({ anchor: match.index, start, end, fieldStart, fieldEnd, fields });
   }
   return out;
 }
 
 /** Run every secret rule over one asset. */
 export function extractSecrets(context: SecretContext): SecretFinding[] {
-  const { asset, lines, showSecrets } = context;
+  const { asset, lines, showSecrets, onCap } = context;
   // Every raw value matched in this asset, so a context window can be swept
   // for credentials other than the one its own finding matched.
   const matched: string[] = [];
@@ -194,17 +232,31 @@ export function extractSecrets(context: SecretContext): SecretFinding[] {
     let match: RegExpExecArray | null;
     let guard = 0;
 
-    while ((match = pattern.exec(text)) !== null && guard < 5000) {
-      guard += 1;
+    while ((match = pattern.exec(text)) !== null) {
       if (match[0].length === 0) {
+        // An empty match consumes no budget: the counter used to be
+        // incremented before this check, so an empty-matching pattern burned
+        // the cap without producing anything.
         pattern.lastIndex += 1;
         continue;
+      }
+      guard += 1;
+      if (guard > MAX_MATCHES_PER_RULE) {
+        onCap?.(
+          `${asset.id}: ${rule.id} stopped after ${MAX_MATCHES_PER_RULE} matches; later matches in this asset were not examined.`,
+        );
+        break;
       }
 
       const groupIndex = rule.group ?? 0;
       const value = match[groupIndex];
       if (value === undefined || value.length === 0) continue;
-      if (value.length > 600) continue;
+      if (value.length > MAX_VALUE_LENGTH) {
+        onCap?.(
+          `${asset.id}: ${rule.id} matched a value of ${value.length} characters, above the ${MAX_VALUE_LENGTH}-character limit; it was skipped.`,
+        );
+        continue;
+      }
 
       const offsetInMatch = groupIndex === 0 ? 0 : match[0].indexOf(value);
       const offset = match.index + (offsetInMatch < 0 ? 0 : offsetInMatch);
@@ -240,6 +292,7 @@ export function extractSecrets(context: SecretContext): SecretFinding[] {
         exposure: override?.exposure ?? rule.exposure,
         severity: placeholder ? 'info' : (override?.severity ?? rule.severity),
         value: show(value),
+        fingerprint: fingerprintOf(value),
         entropy: Number(entropy.toFixed(2)),
         rationale: placeholder
           ? `${override?.rationale ?? rule.rationale} The value matches a documentation or placeholder pattern, so it is reported at informational severity rather than suppressed.`
@@ -260,7 +313,7 @@ export function extractSecrets(context: SecretContext): SecretFinding[] {
   for (const finding of findings) {
     if (finding.rule !== 'google-api-key') continue;
     const block = firebase.find(
-      (config) => finding.offset >= config.start && finding.offset <= config.end,
+      (config) => finding.offset >= config.fieldStart && finding.offset <= config.fieldEnd,
     );
     if (!block) continue;
     finding.exposure = 'public';
@@ -287,6 +340,7 @@ export function extractSecrets(context: SecretContext): SecretFinding[] {
       exposure: 'public',
       severity: 'info',
       value: config.fields['projectId'] ?? '(project id not found)',
+      fingerprint: fingerprintOf(config.fields['projectId'] ?? `firebase:${asset.id}:${config.anchor}`),
       entropy: 0,
       rationale:
         'A complete Firebase web config. Every field here is designed to ship to browsers — the SDK cannot initialise without them. This is recon, not a vulnerability.',
@@ -304,6 +358,11 @@ export function extractSecrets(context: SecretContext): SecretFinding[] {
       ? finding
       : { ...finding, context: scrubContext(finding.context, matched, showSecrets) },
   );
+}
+
+/** A short, non-reversible identifier for a credential value. */
+function fingerprintOf(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 16);
 }
 
 /** Redact the credential inside a context snippet so the snippet is safe to paste. */
@@ -344,12 +403,12 @@ function scrubContext(snippet: string, matched: readonly string[], showSecrets: 
  * is how a tool ends up with three findings for one string.
  */
 function dropWeakerDuplicates(findings: RawFinding[]): RawFinding[] {
-  const confirmedValues = new Set(
-    findings.filter((f) => f.classification === 'confirmed-shape').map((f) => f.value),
+  const confirmed = new Set(
+    findings.filter((f) => f.classification === 'confirmed-shape').map((f) => f.fingerprint),
   );
   return findings.filter(
     (finding) =>
-      finding.classification === 'confirmed-shape' || !confirmedValues.has(finding.value),
+      finding.classification === 'confirmed-shape' || !confirmed.has(finding.fingerprint),
   );
 }
 
@@ -357,7 +416,7 @@ function dropWeakerDuplicates(findings: RawFinding[]): RawFinding[] {
 export function mergeSecrets(findings: SecretFinding[]): SecretFinding[] {
   const byKey = new Map<string, SecretFinding>();
   for (const finding of findings) {
-    const key = `${finding.rule}::${finding.value}`;
+    const key = `${finding.rule}::${finding.fingerprint}`;
     const existing = byKey.get(key);
     if (!existing) {
       byKey.set(key, { ...finding, locations: [...finding.locations] });

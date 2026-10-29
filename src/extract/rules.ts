@@ -63,6 +63,17 @@ export function decodeJwtSegment(segment: string): Record<string, unknown> | nul
 const PUBLIC_BY_DESIGN =
   'Published in client code by design. Not a vulnerability on its own; recorded because it identifies the project and its enabled services.';
 
+/**
+ * Database URI schemes, shared by the two rules that reason about them.
+ *
+ * It was written out twice, and the two copies drifted: `basic-auth-url`'s
+ * exclusion list was missing `mongodb+srv` while `database-connection-string`
+ * matched it, so a `mongodb+srv://user:pass@...` URI produced both findings --
+ * exactly the double-report the exclusion exists to prevent. One list, two
+ * patterns built from it.
+ */
+const DB_SCHEMES = 'postgres(?:ql)?|mysql|mongodb(?:\\+srv)?|redis|rediss|amqps?|clickhouse';
+
 export const SECRET_RULES: readonly SecretRule[] = [
   // ---------------------------------------------------------------- AWS -----
   {
@@ -309,7 +320,10 @@ export const SECRET_RULES: readonly SecretRule[] = [
     id: 'openai-api-key',
     title: 'OpenAI API key',
     provider: 'OpenAI',
-    pattern: /(?<![A-Za-z0-9_-])(sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,})(?![A-Za-z0-9_-])/g,
+    // `sk-ant-` must be excluded explicitly: the character class contains the
+    // hyphen, so an Anthropic key matched this pattern too and was reported
+    // twice, the second time naming the wrong vendor.
+    pattern: /(?<![A-Za-z0-9_-])(sk-(?!ant-)(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,})(?![A-Za-z0-9_-])/g,
     group: 1,
     classification: 'confirmed-shape',
     exposure: 'secret',
@@ -531,7 +545,17 @@ export const SECRET_RULES: readonly SecretRule[] = [
     // Database URIs are covered by their own rule, which reasons about
     // whether a password is present; excluding them here avoids two findings
     // for one credential.
-    pattern: /(?<![A-Za-z0-9+.-])(?!(?:postgres|postgresql|mysql|mongodb|redis|rediss|amqp|amqps|clickhouse):)[a-z][a-z0-9+.-]*:\/\/[^\s:@/"'`<>]{1,64}:[^\s:@/"'`<>]{3,64}@[A-Za-z0-9._-]+\.[A-Za-z]{2,}[^\s"'`<>]*/g,
+    pattern: new RegExp(
+      String.raw`(?<![A-Za-z0-9+.-])(?!(?:${DB_SCHEMES}):)` +
+        String.raw`[a-z][a-z0-9+.-]*:\/\/[^\s:@/"'` +
+        '`' +
+        String.raw`<>]{1,64}:[^\s:@/"'` +
+        '`' +
+        String.raw`<>]{3,64}@[A-Za-z0-9._-]+\.[A-Za-z]{2,}[^\s"'` +
+        '`' +
+        String.raw`<>]*`,
+      'g',
+    ),
     classification: 'confirmed-shape',
     exposure: 'secret',
     severity: 'high',
@@ -541,7 +565,10 @@ export const SECRET_RULES: readonly SecretRule[] = [
   {
     id: 'database-connection-string',
     title: 'Database connection string',
-    pattern: /(?<![A-Za-z0-9+.-])((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqps?|clickhouse):\/\/[^\s"'`<>]{8,200})/g,
+    pattern: new RegExp(
+      String.raw`(?<![A-Za-z0-9+.-])((?:${DB_SCHEMES}):\/\/[^\s"'` + '`' + String.raw`<>]{8,200})`,
+      'g',
+    ),
     group: 1,
     classification: 'confirmed-shape',
     exposure: 'depends',

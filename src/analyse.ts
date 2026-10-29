@@ -187,6 +187,7 @@ export async function analyseAssets(
         );
         endpoints.push(...recovered.endpoints);
         secrets.push(...recovered.secrets);
+        notes.push(...recovered.notes);
         recoveredScannedBytes += recovered.bytes;
         recoveredScannedFiles += recovered.files;
         unparseableRecovered += recovered.unparseable;
@@ -255,6 +256,7 @@ export async function analyseAssets(
           asset: current,
           lines: currentLines,
           showSecrets: options.showSecrets ?? false,
+          onCap: (note) => notes.push(note),
         }),
       );
 
@@ -326,6 +328,7 @@ export async function analyseAssets(
               );
               endpoints.push(...recovered.endpoints);
               secrets.push(...recovered.secrets);
+              notes.push(...recovered.notes);
               recoveredScannedBytes += recovered.bytes;
               recoveredScannedFiles += recovered.files;
               unparseableRecovered += recovered.unparseable;
@@ -445,12 +448,14 @@ function scanRecoveredSources(
 ): {
   endpoints: EndpointFinding[];
   secrets: SecretFinding[];
+  notes: string[];
   bytes: number;
   files: number;
   unparseable: number;
 } {
   const endpoints: EndpointFinding[] = [];
   const secrets: SecretFinding[] = [];
+  const notes: string[] = [];
   let bytes = 0;
   let files = 0;
   let unparseable = 0;
@@ -470,7 +475,12 @@ function scanRecoveredSources(
     const lines = new LineIndex(text);
 
     secrets.push(
-      ...extractSecrets({ asset, lines, showSecrets: options.showSecrets ?? false }),
+      ...extractSecrets({
+        asset,
+        lines,
+        showSecrets: options.showSecrets ?? false,
+        onCap: (note) => notes.push(note),
+      }),
     );
 
     const parsed = parseJs(text);
@@ -489,7 +499,7 @@ function scanRecoveredSources(
     );
   }
 
-  return { endpoints, secrets, bytes, files, unparseable };
+  return { endpoints, secrets, notes, bytes, files, unparseable };
 }
 
 /** Inline `<script>` bodies, as synthetic JavaScript assets. */

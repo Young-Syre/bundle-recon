@@ -179,6 +179,20 @@ export interface SecretFinding {
   severity: Severity;
   /** Redacted unless `--show-secrets` was passed. */
   value: string;
+  /**
+   * First 16 hex characters of sha256 over the *raw* value, never redacted.
+   *
+   * Deduplication keys on this rather than on `value`, because `value` is
+   * redacted by default and `redact` keeps 8 leading plus 4 trailing
+   * characters -- and the leading 8 are near-fixed per vendor (`ghp_`,
+   * `sk_live_`, `AKIA`). Two distinct tokens of equal length sharing their
+   * last four characters therefore collapsed into one finding, so the set of
+   * leaks reported depended on whether --show-secrets was passed.
+   *
+   * It is not reversible and is safe to print; it is also how you confirm two
+   * assets carry the same credential without seeing it.
+   */
+  fingerprint: string;
   /** Shannon entropy of the matched value, in bits per character. */
   entropy: number;
   /** Why this was reported, and what the exposure call rests on. */

@@ -279,3 +279,106 @@ describe('firebase config detection', () => {
     assert.equal(configs[0]?.fields['projectId'], 'a');
   });
 });
+
+describe('deduplication does not depend on how values are displayed', () => {
+  // `redact` keeps 8 leading and 4 trailing characters, and the leading 8 are
+  // near-fixed per vendor. Keying the merge on the displayed value therefore
+  // collapsed two distinct tokens of equal length sharing their last four
+  // characters -- so the set of leaks reported changed with --show-secrets.
+  const text = [
+    `const a = "ghp_${'A'.repeat(32)}WXYZ";`,
+    `const b = "ghp_${'B'.repeat(32)}WXYZ";`,
+  ].join('\n');
+
+  it('reports both tokens whether or not values are shown', () => {
+    for (const showSecrets of [true, false]) {
+      const found = scan(text, 'two-tokens.js', showSecrets).filter((f) => f.rule === 'github-token');
+      assert.equal(found.length, 2, `showSecrets=${showSecrets}`);
+      assert.equal(new Set(found.map((f) => f.fingerprint)).size, 2);
+    }
+  });
+
+  it('the fingerprint is stable, non-reversible and does not contain the value', () => {
+    const [first] = scan(text, 'two-tokens.js', false).filter((f) => f.rule === 'github-token');
+    assert.notEqual(first, undefined);
+    assert.match(first!.fingerprint, /^[0-9a-f]{16}$/);
+    const again = scan(text, 'two-tokens.js', true).filter((f) => f.rule === 'github-token');
+    assert.equal(again[0]?.fingerprint, first!.fingerprint, 'same raw value, same fingerprint');
+  });
+});
+
+describe('a Firebase config only reclassifies the keys inside it', () => {
+  // The containment test used the +-700/+900 search *window*, not the config's
+  // own bounds, so a server-side AIza key within 1,600 characters was relabelled
+  // "Firebase web config", exposure public, severity info, next step "Do not
+  // report as a leak" -- a false-negative control over the most valuable member
+  // of the class.
+  const serverKey = `AIzaSy${'D'.repeat(33)}`;
+  const configKey = `AIzaSy${'A'.repeat(33)}`;
+  const text = [
+    `const serverKey = "${serverKey}";`,
+    `// ${'x'.repeat(400)}`,
+    'const firebaseConfig = {',
+    `  apiKey: "${configKey}",`,
+    '  authDomain: "demo-app.firebaseapp.com",',
+    '  projectId: "demo-app",',
+    '};',
+  ].join('\n');
+
+  it('the distant key keeps its own grade', () => {
+    const found = scan(text, 'firebase.js').filter((f) => f.rule === 'google-api-key');
+    assert.equal(found.length, 2);
+    const distant = found.find((f) => f.value === serverKey);
+    const inside = found.find((f) => f.value === configKey);
+    assert.notEqual(distant, undefined, 'the server key is still reported');
+    assert.equal(distant!.exposure, 'depends');
+    assert.notEqual(distant!.severity, 'info');
+    assert.doesNotMatch(distant!.title, /Firebase/);
+    assert.equal(inside!.exposure, 'public');
+    assert.equal(inside!.severity, 'info');
+    assert.match(inside!.title, /Firebase/);
+  });
+
+  it('the recorded field span is tighter than the search window', () => {
+    const [config] = findFirebaseConfigs(text);
+    assert.notEqual(config, undefined);
+    assert.ok(config!.fieldStart > config!.start);
+    assert.ok(config!.fieldEnd <= config!.end);
+    assert.ok(config!.fieldEnd - config!.fieldStart < 400);
+  });
+});
+
+describe('the extraction caps are reported rather than silent', () => {
+  it('an over-long value is skipped with a note naming the limit', () => {
+    const notes: string[] = [];
+    const text = `const t = "eyJhbGciOiJIUzI1NiJ9.${'A'.repeat(650)}.c2lnbmF0dXJl";`;
+    const found = extractSecrets({
+      asset: { id: 'long.js', kind: 'javascript', text, bytes: Buffer.byteLength(text) },
+      lines: new LineIndex(text),
+      showSecrets: true,
+      onCap: (note) => notes.push(note),
+    });
+    assert.equal(found.filter((f) => f.rule === 'jwt').length, 0);
+    assert.equal(notes.length, 1);
+    assert.match(notes[0]!, /600-character limit/);
+  });
+});
+
+describe('two rules that named the wrong thing', () => {
+  it('a mongodb+srv URI is one finding, not two', () => {
+    // basic-auth-url's exclusion list was missing +srv while the connection
+    // string rule matched it, so one credential produced both findings.
+    const uri = 'mongodb+srv://svcuser:S3cr3tPassw0rd@cluster0.ab12c.mongodb.net/appdb';
+    const ids = scan(`const u = "${uri}";`, 'db.js').map((f) => f.rule);
+    assert.ok(ids.includes('database-connection-string'));
+    assert.ok(!ids.includes('basic-auth-url'), `got ${ids.join(', ')}`);
+  });
+
+  it('an Anthropic key is not also reported as an OpenAI key', () => {
+    // The OpenAI character class contains the hyphen, so sk-ant- matched it.
+    const key = `sk-ant-api03-${'A'.repeat(80)}`;
+    const ids = scan(`const k = "${key}";`, 'llm.js').map((f) => f.rule);
+    assert.ok(ids.includes('anthropic-api-key'));
+    assert.ok(!ids.includes('openai-api-key'), `got ${ids.join(', ')}`);
+  });
+});

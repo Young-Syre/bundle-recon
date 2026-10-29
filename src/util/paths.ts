@@ -10,7 +10,6 @@ import * as path from 'node:path';
  */
 export function safeOutputPath(root: string, source: string): string {
   const cleaned = source
-    // eslint-disable-next-line no-control-regex
     .replace(/\u0000/g, '')
     .replace(/^[a-zA-Z]:[\\/]/, '') // Windows drive root
     .replace(/\\/g, '/');
