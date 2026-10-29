@@ -1,0 +1,35 @@
+{
+  "src/main.ts": {
+    "file": "assets/main-C4f2bd91.js",
+    "src": "src/main.ts",
+    "isEntry": true,
+    "imports": ["_vendor-Bq81c7d2.js"],
+    "css": ["assets/main-D9a1b2c3.css"],
+    "dynamicImports": ["src/pages/admin/AuditLog.vue", "src/pages/billing/Invoices.vue"]
+  },
+  "_vendor-Bq81c7d2.js": {
+    "file": "assets/vendor-Bq81c7d2.js"
+  },
+  "src/pages/index.vue": {
+    "file": "assets/index-A1b2c3d4.js",
+    "src": "src/pages/index.vue"
+  },
+  "src/pages/users/[id].vue": {
+    "file": "assets/_id_-E5f6a7b8.js",
+    "src": "src/pages/users/[id].vue"
+  },
+  "src/pages/admin/AuditLog.vue": {
+    "file": "assets/AuditLog-F9a0b1c2.js",
+    "src": "src/pages/admin/AuditLog.vue",
+    "isDynamicEntry": true
+  },
+  "src/pages/billing/Invoices.vue": {
+    "file": "assets/Invoices-G3d4e5f6.js",
+    "src": "src/pages/billing/Invoices.vue",
+    "isDynamicEntry": true
+  },
+  "src/lib/internal/rbac.ts": {
+    "file": "assets/rbac-H7a8b9c0.js",
+    "src": "src/lib/internal/rbac.ts"
+  }
+}

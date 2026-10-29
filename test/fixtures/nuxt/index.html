@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fixture — Nuxt 2 payload</title>
+  </head>
+  <body>
+    <div id="__nuxt">fixture</div>
+    <script>
+      window.__NUXT__ = {
+        layout: 'default',
+        data: [{ projects: [] }],
+        error: null,
+        state: { auth: { loggedIn: false } },
+        routePath: '/dashboard',
+        config: {
+          public: {
+            apiBase: 'https://nuxt-api.example.internal/api',
+            websocketUrl: 'wss://nuxt-api.example.internal/socket',
+            featureFlags: { betaReports: true }
+          },
+          app: { baseURL: '/', buildAssetsDir: '/_nuxt/' }
+        }
+      };
+    </script>
+  </body>
+</html>
