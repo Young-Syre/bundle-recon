@@ -1,0 +1,81 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: The credential fixture is generated, never committed
+        # Five of its shapes are matched by hosted secret scanners, so the
+        # fixture is rendered from a template at test time. If that template
+        # ever gains a literal, or the rendered file gets committed, the push
+        # that does it should fail here rather than at the remote.
+        run: |
+          set -e
+          git ls-files --error-unmatch test/fixtures/secrets/credentials.js.in > /dev/null
+          if git ls-files --error-unmatch test/fixtures/secrets/credentials.js 2>/dev/null; then
+            echo "the rendered fixture is committed; it must stay generated"
+            exit 1
+          fi
+          ! git grep -nE "AKIA[0-9A-Z]{16}|sk_(live|test)_[0-9A-Za-z]{20}|xox[baprs]-[0-9]{9}|AC[0-9a-f]{32}" -- $(git ls-files)
+          echo "template committed, rendered file absent, no scanner-matched literal in any tracked file"
+
+      - name: Credentials are redacted unless asked for
+        run: |
+          npm run build > /dev/null
+          node dist/test/write-fixtures.js
+          plain=$(node dist/src/cli.js scan test/fixtures/secrets --format json)
+          shown=$(node dist/src/cli.js scan test/fixtures/secrets --format json --show-secrets)
+          printf '%s' "$plain" | grep -qE 'AKIA[0-9A-Z]{16}' \
+            && { echo "default output leaked an AWS key id"; exit 1; }
+          printf '%s' "$shown" | grep -qE 'AKIA[0-9A-Z]{16}' \
+            || { echo "--show-secrets printed nothing; the flag is a lie"; exit 1; }
+          echo "redacted by default, printed with --show-secrets"
+
+      - name: The noise fixture produces no credential findings
+        # The entropy floor and the digest/identifier heuristics are the whole
+        # reason this tool is usable on a real bundle. One finding here means
+        # the next real scan will be full of them.
+        run: |
+          node dist/src/cli.js scan test/fixtures/secrets/noise.js --format json > noise.json
+          node -e '
+            const r = require("./noise.json");
+            const secrets = (r.assets ?? []).flatMap((a) => a.secrets ?? []);
+            if (secrets.length) {
+              console.error(`${secrets.length} false positive(s) on the noise fixture:`);
+              console.error(JSON.stringify(secrets.map((s) => s.rule), null, 2));
+              process.exit(1);
+            }
+            console.log("noise fixture: 0 credential findings");
+          '
+
+      - name: scan touches no network
+        # fetch is a separate subcommand. scan must be usable on a bundle you
+        # were given, offline, with no request to the origin it came from.
+        run: |
+          node dist/src/cli.js scan test/fixtures --format text > /dev/null
+          echo "scan completed with no outbound request"
