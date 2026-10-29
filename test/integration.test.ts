@@ -1,10 +1,12 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import * as fs from 'node:fs/promises';
+import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { analyseDirectory, analyseFile } from '../src/analyse.js';
+import { analyseUrl } from '../src/net/crawl.js';
 import { formatReport } from '../src/report/index.js';
 import type { ReconReport } from '../src/types.js';
 import { fixture } from './helpers.js';
@@ -201,5 +203,95 @@ describe('option handling', () => {
     const big = await analyseDirectory(fixture('bundle'), { maxAssetBytes: 10 });
     assert.ok(big.notes.some((note) => note.includes('exceeds the 10-byte limit')));
     assert.equal(big.endpoints.length, 0);
+  });
+});
+
+describe('fetch mode stays on the origin it was authorised for', () => {
+  // `allowed()` checks the origin about to be requested, but `get()` used
+  // `redirect: 'follow'`, so the target chose the next host. The body came
+  // back attributed to the in-scope path, which put a secret at a URL where
+  // it does not exist and an endpoint on a host never in scope.
+  const SECRET = `ghp_${'C'.repeat(32)}WXYZ`;
+
+  async function listen(handler: http.RequestListener): Promise<{ port: number; close: () => void }> {
+    const server = http.createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    return { port: address.port, close: () => server.close() };
+  }
+
+  it('a cross-origin redirect is reported and not followed', async () => {
+    const other = await listen((req, res) => {
+      if (req.url === '/app.js') {
+        res.writeHead(200, { 'content-type': 'application/javascript' });
+        res.end(`const t = "${SECRET}"; fetch("/api/from-other-origin");`);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const entry = await listen((req, res) => {
+      if (req.url === '/') {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end('<html><body><script src="/app.js"></script></body></html>');
+        return;
+      }
+      if (req.url === '/app.js') {
+        res.writeHead(302, { location: `http://127.0.0.1:${other.port}/app.js` });
+        res.end();
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    try {
+      const report = await analyseUrl(`http://127.0.0.1:${entry.port}/`, {
+        respectRobots: false,
+        showSecrets: true,
+      });
+      const serialised = JSON.stringify(report);
+      assert.ok(!serialised.includes(SECRET), 'no body from the other origin was ingested');
+      assert.ok(!serialised.includes('from-other-origin'), 'no endpoint from the other origin');
+      assert.ok(
+        report.notes.some((note) => note.includes('cross-origin') && note.includes('not followed')),
+        `the hop is reported: ${report.notes.join(' | ')}`,
+      );
+    } finally {
+      entry.close();
+      other.close();
+    }
+  });
+
+  it('a same-origin redirect is still followed', async () => {
+    const entry = await listen((req, res) => {
+      if (req.url === '/') {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end('<html><body><script src="/app.js"></script></body></html>');
+        return;
+      }
+      if (req.url === '/app.js') {
+        res.writeHead(302, { location: '/static/app.v2.js' });
+        res.end();
+        return;
+      }
+      if (req.url === '/static/app.v2.js') {
+        res.writeHead(200, { 'content-type': 'application/javascript' });
+        res.end(`const t = "${SECRET}";`);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    try {
+      const report = await analyseUrl(`http://127.0.0.1:${entry.port}/`, {
+        respectRobots: false,
+        showSecrets: true,
+      });
+      assert.equal(report.secrets.filter((s) => s.value === SECRET).length, 1);
+    } finally {
+      entry.close();
+    }
   });
 });

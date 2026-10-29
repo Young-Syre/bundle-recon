@@ -42,7 +42,7 @@ import {
   writeRecoveredSources,
 } from './extract/sourcemaps.js';
 
-const DEFAULT_MAX_ASSET_BYTES = 24 * 1024 * 1024;
+export const DEFAULT_MAX_ASSET_BYTES = 24 * 1024 * 1024;
 const MAX_RECOVERED_SCAN_BYTES = 8 * 1024 * 1024;
 const MAX_RECOVERED_SCAN_FILES = 500;
 

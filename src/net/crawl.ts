@@ -1,5 +1,5 @@
-import type { AnalyseOptions, Asset, ReconReport } from '../types.js';
-import { analyseAssets, type SourcemapResolver } from '../analyse.js';
+import type { AnalyseOptions, Asset, ReconError, ReconReport } from '../types.js';
+import { analyseAssets, DEFAULT_MAX_ASSET_BYTES, type SourcemapResolver } from '../analyse.js';
 import { kindFromPath } from '../util/paths.js';
 import { extractLinkHrefs, extractScriptTags, jsonScriptById } from '../extract/html.js';
 import { DEFAULT_HTTP_OPTIONS, HttpClient, type HttpOptions } from './http.js';
@@ -40,7 +40,30 @@ export async function analyseUrl(
   options: FetchModeOptions = {},
 ): Promise<ReconReport> {
   const entry = new URL(target);
-  const client = new HttpClient(options.http);
+  // The HTTP truncation limit and the analysis skip limit are the same number.
+  // They were not: maxBytes was hard-coded at 16 MiB while --max-asset-bytes
+  // defaults to 24 and only governed the skip decision, so an asset between
+  // the two was truncated by a limit the operator could not configure -- and
+  // the note said "the configured byte limit". A truncated .map then fails
+  // JSON.parse and is dropped as a parse error rather than a size one, which
+  // is the headline feature on any large app.
+  const byteLimit = options.maxAssetBytes ?? DEFAULT_MAX_ASSET_BYTES;
+  // A request that produces nothing is reported with its reason. Without this,
+  // DNS failure, TLS rejection, timeout and a WAF reset all look the same to
+  // the operator: an empty report.
+  const fetchErrors: ReconError[] = [];
+  const httpOptions: Partial<HttpOptions> = {
+    maxBytes: byteLimit,
+    onError: (url, error) => {
+      fetchErrors.push({
+        asset: safePath(url),
+        stage: 'fetch',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    },
+    ...options.http,
+  };
+  const client = new HttpClient(httpOptions);
   const maxAssets = options.maxAssets ?? 60;
   const respectRobots = options.respectRobots ?? true;
   const notes: string[] = [];
@@ -63,7 +86,7 @@ export async function analyseUrl(
       }
       if (delay !== undefined && delay > 0) {
         const perSecond = 1 / Math.max(delay, 0.001);
-        if (perSecond < (options.http?.requestsPerSecond ?? DEFAULT_HTTP_OPTIONS.requestsPerSecond)) {
+        if (perSecond < (httpOptions.requestsPerSecond ?? DEFAULT_HTTP_OPTIONS.requestsPerSecond)) {
           notes.push(
             `Rate reduced to ${perSecond.toFixed(2)} req/s to respect the declared crawl-delay.`,
           );
@@ -80,9 +103,9 @@ export async function analyseUrl(
   const throttled =
     delaySeconds !== undefined && delaySeconds > 0
       ? new HttpClient({
-          ...options.http,
+          ...httpOptions,
           requestsPerSecond: Math.min(
-            options.http?.requestsPerSecond ?? DEFAULT_HTTP_OPTIONS.requestsPerSecond,
+            httpOptions.requestsPerSecond ?? DEFAULT_HTTP_OPTIONS.requestsPerSecond,
             1 / delaySeconds,
           ),
         })
@@ -120,8 +143,20 @@ export async function analyseUrl(
       cache.set(url, null);
       return null;
     }
+    if (response.offOrigin !== null) {
+      // The target redirected off the origin we were authorised for. The hop is
+      // reported and the request to that origin is never made, so nothing can
+      // be attributed to the in-scope path that did not come from it.
+      notes.push(
+        `${parsed.pathname}: redirected to ${response.offOrigin} (cross-origin); not followed.`,
+      );
+      cache.set(url, null);
+      return null;
+    }
     if (response.truncated) {
-      notes.push(`${parsed.pathname}: response truncated at the configured byte limit.`);
+      notes.push(
+        `${parsed.pathname}: response truncated at ${byteLimit} bytes (--max-asset-bytes).`,
+      );
     }
     cache.set(url, response.body);
     return response.body;
@@ -196,7 +231,7 @@ export async function analyseUrl(
 
   // ---- fetch the assets ---------------------------------------------------
   const ordered = [...scriptUrls];
-  const results = await mapLimit(ordered, (options.http?.concurrency ?? DEFAULT_HTTP_OPTIONS.concurrency), async (url) => {
+  const results = await mapLimit(ordered, (httpOptions.concurrency ?? DEFAULT_HTTP_OPTIONS.concurrency), async (url) => {
     const body = await take(url);
     return body === null ? null : { url, body };
   });
@@ -224,7 +259,7 @@ export async function analyseUrl(
 
     const probeResults = await mapLimit(
       [...new Set(probes)].slice(0, Math.max(0, maxAssets - fetched.size)),
-      options.http?.concurrency ?? DEFAULT_HTTP_OPTIONS.concurrency,
+      httpOptions.concurrency ?? DEFAULT_HTTP_OPTIONS.concurrency,
       async (url) => {
         const body = await take(url, 'source map probe');
         return body === null ? null : { url, body };
@@ -244,8 +279,18 @@ export async function analyseUrl(
 
   const report = await analyseAssets(assets, { kind: 'url', value: entry.toString() }, options, resolver);
   report.notes.unshift(...notes);
+  report.errors.push(...fetchErrors);
   report.notes.push(`HTTP requests issued: ${client.requests + (throttled === client ? 0 : throttled.requests)}`);
   return report;
+}
+
+/** The path of a URL, or the whole string if it will not parse. */
+function safePath(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
 }
 
 function kindFromUrl(url: URL): Asset['kind'] {
