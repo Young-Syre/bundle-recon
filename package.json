@@ -1,0 +1,61 @@
+{
+  "name": "bundle-recon",
+  "version": "0.1.0",
+  "description": "Recover attack surface from a modern JavaScript application's built assets: API endpoints, route manifests, lazy chunks, recovered sources and classified secret candidates.",
+  "license": "MIT",
+  "author": "David Nichols",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "bundle-recon": "dist/src/cli.js"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Young-Syre/bundle-recon.git"
+  },
+  "homepage": "https://github.com/Young-Syre/bundle-recon#readme",
+  "bugs": {
+    "url": "https://github.com/Young-Syre/bundle-recon/issues"
+  },
+  "keywords": [
+    "security",
+    "recon",
+    "javascript",
+    "sourcemap",
+    "nextjs",
+    "webpack",
+    "appsec",
+    "bug-bounty"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.json && chmod +x dist/src/cli.js",
+    "clean": "rm -rf dist",
+    "prepack": "npm run clean && npm run build",
+    "test": "npm run build && node dist/test/write-fixtures.js && node --test dist/test/*.test.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "acorn": "8.19.0",
+    "acorn-walk": "8.3.5",
+    "source-map": "0.7.6"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  }
+}
